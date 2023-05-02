@@ -1,0 +1,564 @@
+%{
+	#include <stdio.h>
+	#include <stdlib.h>
+	#include <string.h> 
+	#include <bits/stdc++.h>
+	#include <vector>
+	#include <iostream>
+	using namespace std;
+	#include "headers/symbolTable.hpp"
+	#include "headers/ast.hpp"
+	#include "headers/codeGeneration.hpp"
+	
+	int yylex();
+
+	vector<code_object> code_objects;
+	void yyerror(const char *err);
+	vector<ASTnode*> *a;
+
+%}
+
+%token PROGRAM
+%token _BEGIN
+%token END
+%token FUNCTION
+%token READ
+%token WRITE
+%token IF
+%token ELSE
+%token ENDIF
+%token WHILE
+%token ENDWHILE 
+%token BREAK
+%token RETURN
+%token CONTINUE
+%token INT
+%token VOID
+%token STRING
+%token FLOAT
+%token <s> IDENTIFIER
+%token <float_value> FLOATLITERAL
+%token <int_value> INTLITERAL
+%token <string_value> STRINGLITERAL
+
+%type <s> id var_type any_type
+%type <string_value> str 
+%type <ast_node> mulop addop primary postfix_expr factor_prefix factor expr_prefix expr compop call_expr
+%type <ast_list> expr_list expr_list_tail
+
+%union
+{
+	int int_value;
+	float float_value;
+	std::string* string_value;
+	std::pair<std::string, int>* s;
+	struct ASTnode* ast_node;
+	std::vector<ASTnode*> *ast_list;
+}
+
+%%
+
+program:	PROGRAM id _BEGIN
+		{
+			addScope("GLOBAL",false,"");
+		} 
+		pgm_body END
+		{			
+			string command = "end\n" ;
+			instructions.push_back(command);
+			
+			// string command = "sys halt\n";
+			// instructions.push_back(command);
+			
+			// printSymbolTable();	
+			printInstructions();
+		};
+
+id:			IDENTIFIER {};
+pgm_body:	decl 
+			{
+				string function_name = "main";
+				push_into_stack(function_name);
+				
+				string command = "sys halt\n";
+				instructions.push_back(command);
+				
+				// cout << "sys halt\n";
+			
+			} func_declarations;
+			
+decl:		string_decl decl | var_decl decl |;
+
+string_decl:	STRING id ':''=' str ';'
+		{	
+			if (isDeclared(($2)->first)) { return 0; }
+			
+			addEntry(($2)->first,"STRING", *($5) ,($2)->second, false);
+			
+			/*if (current_scope == 0 )
+			{	
+				string command = "str " + ($2)->first + " " + *($5) + "\n" ;
+				instructions.push_back(command);
+				
+				// cout<< "str" << ' ' << ($2)->first << " " << *($5) << '\n';
+			}*/
+			
+		};
+str:		STRINGLITERAL {} ;
+var_decl:	var_type 
+		{
+			is_variable_declaration = true;
+			variable_type = ($1)->first;
+		} id_list ';';
+		
+var_type:	FLOAT {  } | INT { };
+
+any_type:	var_type {	}| VOID 
+			{	};
+
+id_list:	id 
+		{
+			if (is_variable_declaration)
+			{
+				if (isDeclared(($1)->first)) { return 0;}
+				addEntry(($1)->first,variable_type,"nan",($1)->second, false);
+				// symbol_tab[function_scope].link++;
+				if (current_scope == 0 )
+				{
+					string command = "var " + ($1)->first + "\n";
+					instructions.push_back(command);
+					
+					// cout << "var " << ($1)->first <<'\n';
+				}
+			}
+			else if (is_write)
+			{	
+				write_code(($1)->first);	
+			}
+			else if (is_read)
+			{
+				read_code(($1)->first);
+			}
+		}id_tail;
+		
+id_tail:	',' id
+	{
+		if (is_variable_declaration)
+		{
+			if (isDeclared(($2)->first)) { return 0;}
+			addEntry(($2)->first,variable_type,"nan",($2)->second, false);
+			
+			if (current_scope == 0 )
+			{
+				string command = "var " + ($2)->first + "\n";
+				instructions.push_back(command);
+				
+				// cout << "var " << ($2)->first <<'\n';
+			}
+			
+		}
+		else if (is_write)
+		{
+			write_code(($2)->first);
+	
+		}
+		else if (is_read)
+		{
+			read_code(($2)->first);
+		}
+	}
+	id_tail |
+	{
+		is_variable_declaration = false;
+	};
+
+
+param_decl_list:	param_decl param_decl_tail |;
+
+param_decl:	var_type id
+			{
+				if (isDeclared(($2)->first)) { return 0;}
+				addEntry(($2)->first,($1)->first,"nan",($2)->second, true);
+			};
+
+
+param_decl_tail:	',' param_decl param_decl_tail |;
+func_declarations:	func_decl func_declarations |;
+
+func_decl:	FUNCTION any_type id 
+		{
+			string function_name = ($3)->first;
+			
+			string command = "label " + function_name + '\n';
+			instructions.push_back(command);
+					
+			// cout << "label " << function_name << '\n';
+			
+			addScope(function_name,false, ($2)->first);
+			function_scope = current_scope;
+			
+		} '(' param_decl_list ')' _BEGIN func_body 
+		END 
+		{
+			links.push_back(-symbol_table[function_scope].local);
+			current_scope = symbol_table[current_scope].parent_scopes[1];
+		};
+
+
+func_body:	decl 
+			{	
+				string command = "link";
+				instructions.push_back(command);
+				// cout << "link " << to_string(-symbol_table[current_scope].local)<< '\n';
+			} stmt_list;
+
+stmt_list:	stmt stmt_list |;
+
+stmt:		base_stmt | if_stmt | while_stmt;
+
+base_stmt:	assign_stmt | read_stmt | write_stmt | return_stmt;
+
+assign_stmt:	assign_expr ';';
+
+assign_expr:	id ':''=' expr
+{
+	struct ASTnode * id_node = create_node("IDENTIFIER",($1)->first, nullptr, nullptr,a);
+	struct ASTnode * node = create_node("OPERATOR", ":=", id_node , $4,a);
+	struct code_object* exp_code_object = generate_code(node);
+	
+	for (auto& it : exp_code_object->instructions) 
+	{
+		string command = it + '\n';
+		instructions.push_back(command);
+	}
+};
+
+read_stmt:	READ 
+{
+	is_read = true;
+
+} '(' id_list ')'
+{
+	is_read = false;
+} ';' ;
+
+write_stmt:	WRITE 
+{ 
+	is_write = true;
+} '(' id_list ')'
+{
+	is_write = false;
+} ';';
+
+return_stmt:	RETURN expr ';'
+				{
+					struct code_object* ret_code_object = generate_code($2);
+					for (auto& it : ret_code_object->instructions) 
+					{
+						string command = it + '\n';
+						instructions.push_back(command);
+						// cout << it << '\n';
+					}
+					
+					string command = "move " + ret_code_object->result_register + " $" + to_string(symbol_table[function_scope].param + 1) + '\n';
+					instructions.push_back(command);
+					
+					// cout << "move " << ret_code_object->result_register << " $" << to_string(symbol_table[function_scope].param + 1)<<'\n';
+					
+					command = "unlnk\n";
+					instructions.push_back(command);
+					
+					// cout << "unlnk\n";
+					
+					command = "ret\n";
+					instructions.push_back(command);
+					
+					// cout << "ret\n";
+				} ;
+
+expr:		expr_prefix factor 
+{
+	if ($1 == nullptr)
+	{
+		$$ = $2;
+	}
+	else 
+	{
+		$1->right = $2;
+		$$ = $1;
+	}
+};
+
+expr_prefix:	expr_prefix factor addop 
+{
+    if ($1 == nullptr)
+    {
+    	$3->left = $2;
+    }    
+    else 
+    {
+        $1->right = $2;
+        $3->left = $1;
+    }
+    $$ = $3;
+} | { $$ = nullptr; };
+                    
+                    
+factor:		factor_prefix postfix_expr
+{
+    if ($1 == nullptr)
+    {
+    	$$ = $2;
+    } 
+    else
+    {
+        $1->right = $2;
+        $$ = $1;
+    }
+};
+
+factor_prefix:	factor_prefix postfix_expr mulop
+{
+	if ($1 == nullptr)
+	{
+		$3->left = $2;
+	}
+	else
+	{
+		$1->right = $2;
+		$3->left = $1;
+	}
+	$$ = $3; 
+} | { $$ = nullptr; } ;
+
+postfix_expr:	primary { $$ = $1; } | call_expr {$$ = $1;};
+
+call_expr:	id '(' expr_list ')' 
+			{
+				$$ = create_node("CALL",($1)->first,nullptr,nullptr,$3);	
+			};
+
+expr_list:	expr expr_list_tail 
+			{
+				$$ = $2;
+				$$->push_back($1);
+			}|
+			{  
+				vector<ASTnode *> *node = new vector<ASTnode*>;
+                $$ = node;
+			};
+
+expr_list_tail:	',' expr expr_list_tail 
+				{
+					$$ = $3;
+					$$->push_back($2);
+				}|
+				{
+					vector<ASTnode *> *node = new vector<ASTnode*>;
+					$$ = node;
+				};
+
+primary:	'(' expr ')' 
+			{
+				$$ = $2;
+			} 
+			| id 
+			{
+				
+				$$ = create_node("IDENTIFIER",($1)->first,nullptr,nullptr,a);
+			
+			} 
+			| INTLITERAL
+			{
+				
+				$$ = create_node("INTLITERAL",to_string($1),nullptr,nullptr,a);			
+			} 
+			| FLOATLITERAL
+			{
+				
+				$$ = create_node("FLOATLITERAL",to_string($1),nullptr,nullptr,a);
+			
+			};
+			
+addop:		'+'{ $$ = create_node("OPERATOR","+",nullptr,nullptr,a);}
+			|'-'{ $$ = create_node("OPERATOR","-",nullptr,nullptr,a); };
+
+mulop:		'*'{ $$ = create_node("OPERATOR","*",nullptr,nullptr,a);}
+			|'/'{ $$ = create_node("OPERATOR","/",nullptr,nullptr, a);};
+
+if_stmt:	IF 
+			{
+				addScope("BLOCK",true,"");	
+			} 
+			'(' cond ')' decl stmt_list
+			{	
+				int aelabel = labels[labels.size()-1]; 
+				
+				string command = "jmp label" + to_string(aelabel) + '\n';
+				instructions.push_back(command);
+				
+				// cout << "jmp label" << to_string(aelabel) << '\n';  /* Unconditional jump to after else part  */
+				
+				command = "label label" + to_string(aelabel-1) + '\n';
+				instructions.push_back(command);
+				
+				// cout << "label label" << to_string(aelabel-1) << '\n';  /* else label */ 
+				
+				current_scope = symbol_table[current_scope].parent_scopes[1];
+			}
+			else_part ENDIF
+			{
+				int elabel = labels[labels.size()-1];
+				
+				string command = "label label" + to_string(elabel) +'\n';
+				instructions.push_back(command);
+				
+				// cout << "label label" << to_string(elabel) <<'\n'; /* after else label */
+				labels.pop_back();
+			};
+
+
+else_part:	ELSE 
+			{	
+				addScope("BLOCK",true,"");
+				
+			}
+			decl stmt_list 
+			{
+				current_scope = symbol_table[current_scope].parent_scopes[1];
+			}|;
+
+
+cond:		expr compop expr
+			{
+				$2->left = $1;
+				$2->right = $3;
+				
+				struct code_object* cond_code_object = generate_code($2);
+				for (auto& it : cond_code_object->instructions) 
+				{
+					// cout << it << '\n';
+					string command = it + '\n';
+					instructions.push_back(command);
+				}			
+			};
+
+compop:		'<'{$$ = create_node("COMPARE","<",nullptr,nullptr,a);} |'>'{$$ = create_node("COMPARE",">",nullptr,nullptr,a);} 
+			|'='{$$ = create_node("COMPARE","=",nullptr,nullptr,a);}|'!''='{$$ = create_node("COMPARE","!=",nullptr,nullptr,a);}
+			|'<''='{$$ = create_node("COMPARE","<=",nullptr,nullptr,a);}|'>''='{$$ = create_node("COMPARE",">=",nullptr,nullptr,a);};
+
+
+while_stmt: WHILE 
+			{	
+				is_while_block = true;
+				addScope("BLOCK",true,"");
+				int pelabel;
+				if ((labels.size()) == 0)
+				{
+					pelabel = label_count;
+				}
+				else
+				{
+					pelabel = labels[labels.size()-1];
+				}
+				
+				string command = "label label" + to_string(pelabel+2) + '\n';
+				instructions.push_back(command);
+				
+				// cout << "label label" << to_string(pelabel+2) << '\n'; /* (label of previous +2 will be label for condition)label for checking condition code */
+				
+			} 
+			'(' cond ')' 
+			{
+				is_while_block = false;
+			}
+			
+			decl aug_stmt_list 
+			{
+				int elabel = labels[labels.size()-1];
+				
+				string command = "jmp label" + to_string(elabel) + '\n';
+				instructions.push_back(command);
+				
+				// cout << "jmp label" << to_string(elabel) << '\n'; /* unconditional jmp to condition checking */
+				
+			}
+			ENDWHILE
+			{
+				int elabel = labels[labels.size()-1];
+				
+				string command = "label label" + to_string(elabel-1) + '\n';
+				instructions.push_back(command);
+				
+				// cout << "label label" << to_string(elabel-1) << '\n'; /* out of while label */
+				
+				labels.pop_back();
+				while_labels.pop_back();
+				current_scope = symbol_table[current_scope].parent_scopes[1];
+			};
+
+aug_stmt_list: aug_stmt aug_stmt_list |;
+
+aug_stmt: base_stmt
+		| aug_if_stmt 
+		| while_stmt 
+		
+		| CONTINUE 
+		 { 
+			int elabel = while_labels[while_labels.size()-1];
+			
+			string command = "jmp label" + to_string(elabel) + '\n';
+			instructions.push_back(command);
+				
+			// cout << "jmp label" << to_string(elabel) << '\n'; /* jmp to condition checking */
+		 } ';' 
+		 
+		| BREAK 
+		{
+			int elabel = while_labels[while_labels.size()-1];
+			
+			string command = "jmp label" + to_string(elabel-1) + '\n';
+			instructions.push_back(command);
+			
+			// cout << "jmp label" << to_string(elabel-1) << '\n'; /* jmp to out of while */
+			
+		} ';';
+
+aug_if_stmt: IF { 
+					addScope("BLOCK",true,""); 
+				}'(' cond ')'
+
+decl aug_stmt_list
+{
+	int aelabel = labels[labels.size()-1]; 
+	
+	string command = "jmp label" + to_string(aelabel) + '\n';
+	instructions.push_back(command);
+	
+	command = "label label" + to_string(aelabel-1) + '\n';
+	instructions.push_back(command);
+	
+	
+	// cout << "jmp label" << to_string(aelabel) << '\n';  /* Unconditional jump to after else part  */
+	// cout << "label label" << to_string(aelabel-1) << '\n';  /* else label */
+	
+	current_scope = symbol_table[current_scope].parent_scopes[1];
+	
+} 
+aug_else_part ENDIF
+{
+	int elabel = labels[labels.size()-1];
+	
+	string command = "label label" + to_string(elabel) + '\n';
+	instructions.push_back(command);
+	
+	// cout << "label label" << to_string(elabel) <<'\n'; /* after else label */
+	labels.pop_back();
+	
+};
+
+aug_else_part: ELSE {addScope("BLOCK",true,""); } 
+				decl aug_stmt_list 
+				{current_scope = symbol_table[current_scope].parent_scopes[1]; }|;
+
+%%
